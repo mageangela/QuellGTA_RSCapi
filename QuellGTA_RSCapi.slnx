@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="QuellGTA_RSCapi/QuellGTA_RSCapi.vcxproj" Id="3ead881c-64e3-4ec1-a9f2-217454e3cd87" />
+</Solution>
