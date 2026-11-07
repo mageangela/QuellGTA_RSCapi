@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 
 #include "nlohmann/json.hpp"
 
@@ -206,13 +207,20 @@ static uintptr_t GetModuleBase(DWORD pid, const std::string& moduleName) {
 }
 
 // 读取 SCAUTH，返回 NotAuth 表示失败
-static Err ReadSCAuth(const std::string& configPath, std::string& out) {
+// processExists: 输出参数，表示目标进程是否正在运行。
+//               LoadConfig 失败时为 false（无法判定模块名）。
+static Err ReadSCAuth(const std::string& configPath, std::string& out,
+    bool* processExists = nullptr) {
     out.clear();
+    if (processExists) *processExists = false;
+
     AuthConfig cfg;
     if (!LoadConfig(configPath, cfg)) return Err::NotAuth;
 
     DWORD pid = FindPidByModule(cfg.moduleName);
-    if (!pid) return Err::NotAuth;
+    if (!pid) return Err::NotAuth;  // 进程不存在
+
+    if (processExists) *processExists = true;
 
     HANDLE hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
         FALSE, pid);
@@ -230,7 +238,6 @@ static Err ReadSCAuth(const std::string& configPath, std::string& out) {
             CloseHandle(hProc);
             return Err::NotAuth;
         }
-        // 非法指针保护：低于 64KB 视为无效
         if (p < 0x10000) {
             CloseHandle(hProc);
             return Err::NotAuth;
@@ -498,6 +505,26 @@ static SetResult SetCrew(const std::string& scAuth, long long crewId) {
     }
 }
 
+static bool WriteAuthCache(const std::filesystem::path& path,
+    const std::string& data) {
+    if (data.empty()) return false;
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(data.data(), (std::streamsize)data.size());
+    return f.good();
+}
+
+static bool ReadAuthCache(const std::filesystem::path& path,
+    std::string& out) {
+    out.clear();
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return !out.empty();
+}
+
 std::filesystem::path GetExeDir()
 {
     wchar_t buf[MAX_PATH];
@@ -517,10 +544,28 @@ int main(int argc, char* argv[]) {
     }
     std::string cmd = argv[1];
 
-    // ---- 先读取 SCAUTH，失败直接返回 NotAuth ----
+    // ---- 先读取 SCAUTH：优先从进程内存读取，失败时按情况回退到缓存 ----
     std::string scAuth;
-    std::filesystem::path dataPath = GetExeDir() / L"RSCapi.dat";
-    if (ReadSCAuth(dataPath.string(), scAuth) != Err::None) {
+    std::filesystem::path exeDir = GetExeDir();
+    std::filesystem::path dataPath = exeDir / L"RSCapi.dat";
+    std::filesystem::path cachePath = exeDir / L"RSCapi.sca";
+
+    bool processExists = false;
+    Err readResult = ReadSCAuth(dataPath.string(), scAuth, &processExists);
+
+    if (readResult == Err::None) {
+        // 读取成功：刷新缓存文件
+        WriteAuthCache(cachePath, scAuth);
+    }
+    else if (!processExists) {
+        // 进程不存在：尝试使用缓存
+        if (!ReadAuthCache(cachePath, scAuth)) {
+            std::cout << "NotAuth\n";
+            return 1;
+        }
+    }
+    else {
+        // 进程存在但读取失败：正常报错，不回退缓存
         std::cout << "NotAuth\n";
         return 1;
     }
